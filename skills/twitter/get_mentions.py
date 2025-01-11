@@ -1,5 +1,6 @@
+
 from datetime import datetime, timedelta, timezone
-from typing import Type
+from typing import List, Optional, Type
 
 from pydantic import BaseModel
 
@@ -7,101 +8,84 @@ from .base import Tweet, TwitterBaseTool
 
 
 class TwitterGetMentionsInput(BaseModel):
-    """Input for TwitterGetMentions tool."""
+    """Input schema for the TwitterGetMentions tool."""
+    pass
 
 
 class TwitterGetMentionsOutput(BaseModel):
-    mentions: list[Tweet]
-    error: str | None = None
+    mentions: List[Tweet]
+    error: Optional[str] = None
 
 
 class TwitterGetMentions(TwitterBaseTool):
-    """Tool for getting mentions from Twitter.
-
-    This tool uses the Twitter API v2 to retrieve mentions (tweets in which the authenticated
-    user is mentioned) from Twitter.
+    """Tool for retrieving mentions from Twitter using the Twitter API v2.
 
     Attributes:
         name: The name of the tool.
-        description: A description of what the tool does.
-        args_schema: The schema for the tool's input arguments.
+        description: A description of the tool's purpose.
+        args_schema: The schema for input arguments.
     """
 
     name: str = "twitter_get_mentions"
-    description: str = "Get tweets that mention the authenticated user"
+    description: str = "Retrieve tweets mentioning the authenticated user."
     args_schema: Type[BaseModel] = TwitterGetMentionsInput
 
     def _run(self) -> TwitterGetMentionsOutput:
-        """Run the tool to get mentions.
+        """Fetch mentions from Twitter.
 
         Returns:
-            TwitterGetMentionsOutput: A structured output containing the mentions data.
-
-        Raises:
-            Exception: If there's an error accessing the Twitter API.
+            TwitterGetMentionsOutput: Contains the fetched mentions or an error message.
         """
         try:
-            # get since id from store
-            last = self.store.get_agent_skill_data(self.agent_id, self.name, "last")
-            last = last or {}
-            max_results = 10
+            # Retrieve the last stored `since_id` for incremental fetching.
+            last = self.store.get_agent_skill_data(self.agent_id, self.name, "last") or {}
             since_id = last.get("since_id")
-            if since_id:
-                max_results = 100
+            max_results = 100 if since_id else 10
 
-            # Always get mentions for the last day
-            start_time = (datetime.now(tz=timezone.utc) - timedelta(days=1)).isoformat(
-                timespec="milliseconds"
-            )
+            # Define the start time (mentions from the last 24 hours).
+            start_time = (datetime.now(tz=timezone.utc) - timedelta(days=1)).isoformat(timespec="milliseconds")
 
-            mentions = self.client.get_users_mentions(
+            # Fetch mentions using the Twitter API client.
+            response = self.client.get_users_mentions(
                 id=self.client.get_me()[0].id,
                 max_results=max_results,
                 since_id=since_id,
                 start_time=start_time,
-                expansions=[
-                    "referenced_tweets.id",
-                    "attachments.media_keys",
-                ],
-                tweet_fields=[
-                    "created_at",
-                    "author_id",
-                    "text",
-                    "referenced_tweets",
-                    "attachments",
-                ],
+                expansions=["referenced_tweets.id", "attachments.media_keys"],
+                tweet_fields=["created_at", "author_id", "text", "referenced_tweets", "attachments"],
             )
 
-            result = []
-            if mentions.data:
-                for tweet in mentions.data:
+            mentions = []
+            if response.data:
+                for tweet in response.data:
                     mention = Tweet(
                         id=str(tweet.id),
                         text=tweet.text,
                         author_id=str(tweet.author_id),
                         created_at=tweet.created_at,
-                        referenced_tweets=tweet.referenced_tweets
-                        if hasattr(tweet, "referenced_tweets")
-                        else None,
-                        attachments=tweet.attachments
-                        if hasattr(tweet, "attachments")
-                        else None,
+                        referenced_tweets=getattr(tweet, "referenced_tweets", None),
+                        attachments=getattr(tweet, "attachments", None),
                     )
-                    result.append(mention)
+                    mentions.append(mention)
 
-            # Update the previous since_id for the next request
-            if mentions.meta:
-                last["since_id"] = mentions.meta.get("newest_id")
+            # Update `since_id` for future requests.
+            if response.meta and "newest_id" in response.meta:
+                last["since_id"] = response.meta["newest_id"]
                 self.store.save_agent_skill_data(self.agent_id, self.name, "last", last)
 
-            return TwitterGetMentionsOutput(mentions=result)
+            return TwitterGetMentionsOutput(mentions=mentions)
 
+        except AttributeError as attr_err:
+            return TwitterGetMentionsOutput(mentions=[], error=f"Attribute error: {str(attr_err)}")
+        except KeyError as key_err:
+            return TwitterGetMentionsOutput(mentions=[], error=f"Key error: {str(key_err)}")
         except Exception as e:
-            return TwitterGetMentionsOutput(mentions=[], error=str(e))
+            return TwitterGetMentionsOutput(mentions=[], error=f"Unexpected error: {str(e)}")
 
     async def _arun(self) -> TwitterGetMentionsOutput:
-        """Async implementation of the tool.
+        """Asynchronous version of the `_run` method.
 
-        This tool doesn't have a native async implementation, so we call the sync version.
+        Note:
+            This tool does not have a native async implementation, so the sync version is used.
         """
         return self._run()
